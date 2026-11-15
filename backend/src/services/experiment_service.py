@@ -69,6 +69,28 @@ def serialize(experiment: Experiment, *, variants: list[Variant] | None = None) 
     }
 
 
+def _latest_analysis_map(db: Session, ids: list[int]) -> dict[int, dict]:
+    from src.models.analysis_run import AnalysisRun
+
+    if not ids:
+        return {}
+    rows = db.scalars(
+        select(AnalysisRun).where(AnalysisRun.experiment_id.in_(ids)).order_by(AnalysisRun.run_no)
+    ).all()
+    latest: dict[int, dict] = {}
+    for row in rows:
+        current = latest.get(row.experiment_id)
+        if current is None or row.run_no >= current["latest_run_no"]:
+            latest[row.experiment_id] = {
+                "latest_run_no": row.run_no,
+                "status": row.status,
+                "computed_at": iso_utc(row.computed_at),
+                "date_from": row.date_from,
+                "date_to": row.date_to,
+            }
+    return latest
+
+
 def list_experiments(
     db: Session,
     *,
@@ -98,8 +120,17 @@ def list_experiments(
     total = db.scalar(count_stmt) or 0
     rows = db.scalars(stmt.order_by(Experiment.id).limit(limit).offset(offset)).all()
     variant_map = _variants_by_experiment(db, [row.id for row in rows])
+    analysis_map = _latest_analysis_map(db, [row.id for row in rows])
+    items = []
+    for row in rows:
+        item = serialize(row, variants=variant_map.get(row.id, []))
+        item["analysis"] = analysis_map.get(
+            row.id,
+            {"latest_run_no": None, "status": "none", "computed_at": None, "date_from": None, "date_to": None},
+        )
+        items.append(item)
     return {
-        "items": [serialize(row, variants=variant_map.get(row.id, [])) for row in rows],
+        "items": items,
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -138,14 +169,34 @@ def detail(db: Session, experiment_id: int) -> dict:
     metrics = db.scalars(
         select(MetricResult).where(MetricResult.experiment_id == experiment_id).order_by(MetricResult.metric_key)
     ).all()
-    # 只统计主指标口径，避免 3 个指标的样本被重复相加
-    sample_rows = db.execute(
-        select(func.sum(Assignment.samples), func.sum(Assignment.conversions), func.count())
-        .where(Assignment.experiment_id == experiment_id, Assignment.metric_key == experiment.primary_metric)
-    ).one()
     payload = serialize(experiment, variants=variants)
-    payload["sample_total"] = int(sample_rows[0] or 0)
-    payload["assignment_rows"] = int(sample_rows[2] or 0)
+    # 样本合计只统计主指标口径，同时给出 canonical 来源说明
+    from src.services import analysis_service, canonical_service
+
+    if canonical_service.has_returns(db, experiment.id):
+        totals = canonical_service.variant_metric_totals(db, experiment, experiment.primary_metric)
+        payload["sample_total"] = sum(bucket["samples"] for bucket in totals.values())
+        payload["assignment_rows"] = sum(1 for row in canonical_service.canonical_rows(db, experiment))
+        payload["sample_origin"] = "reconciliation"
+    else:
+        sample_rows = db.execute(
+            select(func.sum(Assignment.samples), func.sum(Assignment.conversions), func.count())
+            .where(Assignment.experiment_id == experiment_id, Assignment.metric_key == experiment.primary_metric)
+        ).one()
+        payload["sample_total"] = int(sample_rows[0] or 0)
+        payload["assignment_rows"] = int(sample_rows[2] or 0)
+        payload["sample_origin"] = "assignment"
+    latest = analysis_service.latest_run(db, experiment.id)
+    payload["analysis"] = {
+        "latest_run_id": latest.id if latest else None,
+        "latest_run_no": latest.run_no if latest else None,
+        "status": latest.status if latest else "none",
+        "computed_at": latest.computed_at.isoformat(timespec="seconds") + "Z" if latest and latest.computed_at else None,
+        "date_from": latest.date_from if latest else None,
+        "date_to": latest.date_to if latest else None,
+        "dates_used": latest.dates_used if latest else [],
+        "decision_basis": latest.decision_basis if latest else {},
+    }
     payload["metrics"] = [
         {
             "metric_key": row.metric_key,
@@ -171,6 +222,10 @@ def detail(db: Session, experiment_id: int) -> dict:
             "rationale": decision.rationale,
             "decided_by": decision.decided_by,
             "decided_at": iso_utc(decision.decided_at),
+            "analysis_run_no": decision.analysis_run_no,
+            "revision": decision.revision,
+            "status": decision.status,
+            "stale_reason": decision.stale_reason,
         }
         if decision
         else None

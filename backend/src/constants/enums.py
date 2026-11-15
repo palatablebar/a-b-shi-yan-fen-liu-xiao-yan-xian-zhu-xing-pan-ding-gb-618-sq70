@@ -134,3 +134,76 @@ TRIGGER_LABELS: dict[str, str] = {
     TriggerKind.SCHEDULE.value: "定时",
     TriggerKind.SEED.value: "初始化",
 }
+
+
+class ReturnSource(StrEnum):
+    """每日回传的两条数据源。"""
+
+    ASSIGNMENT = "assignment"  # 实验平台：只负责分流
+    METRIC = "metric"          # 指标库：只负责转化
+
+
+RETURN_SOURCE_LABELS: dict[str, str] = {
+    ReturnSource.ASSIGNMENT.value: "实验平台（分流）",
+    ReturnSource.METRIC.value: "指标库（转化）",
+}
+
+RETURN_SOURCE_SHORT: dict[str, str] = {
+    ReturnSource.ASSIGNMENT.value: "实验平台",
+    ReturnSource.METRIC.value: "指标库",
+}
+
+
+class ReconcileStatus(StrEnum):
+    """逐格对账结论。"""
+
+    COMPLETE = "complete"
+    DELAYED = "delayed"
+    CONFLICT = "conflict"
+    RECONCILED = "reconciled"
+
+
+RECONCILE_STATUS_LABELS: dict[str, str] = {
+    ReconcileStatus.COMPLETE.value: "齐全",
+    ReconcileStatus.DELAYED.value: "延迟",
+    ReconcileStatus.CONFLICT.value: "冲突",
+    ReconcileStatus.RECONCILED.value: "已和解",
+}
+
+RECONCILE_STATUS_ORDER: list[str] = [
+    ReconcileStatus.CONFLICT.value,
+    ReconcileStatus.DELAYED.value,
+    ReconcileStatus.RECONCILED.value,
+    ReconcileStatus.COMPLETE.value,
+]
+
+RECONCILE_RESOLUTION_LABELS: dict[str, str] = {
+    ReturnSource.ASSIGNMENT.value: "采用实验平台",
+    ReturnSource.METRIC.value: "采用指标库",
+}
+
+
+class AnalysisStatus(StrEnum):
+    """分析批次状态。"""
+
+    READY = "ready"
+    INVALIDATED = "invalidated"
+    RECOMPUTING = "recomputing"
+
+
+ANALYSIS_STATUS_LABELS: dict[str, str] = {
+    AnalysisStatus.READY.value: "有效",
+    AnalysisStatus.INVALIDATED.value: "已作废",
+    AnalysisStatus.RECOMPUTING.value: "重算中",
+}
+
+
+class ReturnBatchStatus(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+
+
+RETURN_BATCH_STATUS_LABELS: dict[str, str] = {
+    ReturnBatchStatus.ACTIVE.value: "生效",
+    ReturnBatchStatus.SUPERSEDED.value: "已被新批次取代",
+}

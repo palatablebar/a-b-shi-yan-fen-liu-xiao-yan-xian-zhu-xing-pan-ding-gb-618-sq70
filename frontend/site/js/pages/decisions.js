@@ -28,23 +28,30 @@ function exportButtons(role) {
     <button class="btn sm ghost" data-export="assignments">分流样本 CSV</button>
     <button class="btn sm ghost" data-export="metrics">指标检验 CSV</button>
     <button class="btn sm ghost" data-export="decisions">决策清单 CSV</button>
+    <button class="btn sm ghost" data-export="reconciliation">对账明细 CSV</button>
+    <button class="btn sm ghost" data-export="analysis-runs">分析批次 CSV</button>
   </div>`;
 }
 
 function openDecision(view, ctx, experiments, pending) {
   if (!pending.length) {
-    toast('所有实验都已出决策');
+    toast('没有待决策或待改判的实验');
     return;
   }
   const first = pending[0];
   const { root, close } = drawer({
-    title: '出决策',
-    subtitle: `${first.experiment.code} · ${first.primary.metric_name || '主指标'} q=${fmtP(first.primary.q_value)}`,
+    title: first.existing ? '基于新批次改判' : '出决策',
+    subtitle: `${first.experiment.code} · ${first.primary.metric_name || '主指标'} q=${fmtP(first.primary.q_value)}${
+      first.run && first.run.latest_run_no ? ` · 分析批次 #${first.run.latest_run_no}` : ''
+    }`,
     body: `<form id="decision-form" style="display:grid;gap:12px">
       ${field({
-        label: '实验（仅列未决策）',
+        label: '实验（未决策 / 过期决策）',
         name: 'experiment_id',
-        options: pending.map((item) => ({ value: item.experiment.id, label: `${item.experiment.code} · ${item.experiment.name}` })),
+        options: pending.map((item) => ({
+          value: item.experiment.id,
+          label: `${item.experiment.code} · ${item.existing ? '改判' : '首次'} · ${item.experiment.name}`,
+        })),
       })}
       ${field({
         label: '结论',
@@ -55,14 +62,17 @@ function openDecision(view, ctx, experiments, pending) {
       ${field({
         label: '理由（写进会议纪要）',
         name: 'rationale',
+        type: 'textarea',
         placeholder: '主指标 lift 10.9%，BH 校正后 q=0.044 < 0.05，样本量已过功效线，上线。',
+        attrs: 'rows="4"',
       })}
       <div class="form-error" id="decision-error"></div>
       <button class="btn accent" type="submit">写入决策</button>
     </form>
-    <div class="note" style="margin-top:10px">同一实验只能有一条决策（重复提交返回 409）</div>`,
+    <div class="note" style="margin-top:10px">决策必须引用有效分析批次；旧版本会进修订史。同一实验只有一条当前决策。</div>`,
   });
   const form = root.querySelector('#decision-form');
+  form.rationale.value = first.rationale;
   const syncSuggestion = () => {
     const picked = pending.find((item) => String(item.experiment.id) === String(form.experiment_id.value));
     if (!picked) return;
@@ -70,7 +80,6 @@ function openDecision(view, ctx, experiments, pending) {
     form.rationale.value = picked.rationale;
   };
   form.experiment_id.addEventListener('change', syncSuggestion);
-  form.rationale.value = first.rationale;
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const errorNode = root.querySelector('#decision-error');
@@ -83,7 +92,12 @@ function openDecision(view, ctx, experiments, pending) {
       close();
       await decisionsPage.render(view, ctx);
     } catch (err) {
-      errorNode.textContent = err.code === 'CONFLICT' ? '这个实验已经有决策了（409）' : errorMessage(err);
+      errorNode.textContent =
+        err.code === 'CONFLICT'
+          ? '这个实验已有有效决策（409）'
+          : err.code === 'VALIDATION'
+            ? '没有有效分析批次，先完成对账并生成批次'
+            : errorMessage(err);
     }
   });
 }
@@ -109,21 +123,35 @@ export const decisionsPage = {
       return;
     }
 
-    const decidedIds = new Set(decisions.items.map((item) => String(item.experiment_id)));
-    const pendingExperiments = experiments.items.filter((item) => !decidedIds.has(String(item.id)));
+    const activeDecisions = decisions.items.filter((item) => item.status === 'active');
+    const staleDecisions = decisions.items.filter((item) => item.status === 'stale');
+    const activeIds = new Set(activeDecisions.map((item) => String(item.experiment_id)));
+    const candidates = experiments.items.filter(
+      (item) => !activeIds.has(String(item.id)),
+    );
     const details = await Promise.all(
-      pendingExperiments.map((item) => api.get(`/api/experiments/${item.id}`).catch(() => item)),
+      candidates.map((item) => api.get(`/api/experiments/${item.id}`).catch(() => item)),
     );
     const pending = details
       .map((experiment) => {
         const primary = (experiment.metrics || []).find((metric) => metric.is_primary) || {};
-        const suggested = primary.significant ? (primary.lift >= 0 ? 'ship' : 'stop') : 'continue';
-        const rationale = primary.metric_name
-          ? `${primary.metric_name}：lift ${signedPct(primary.lift, 1)}，p=${fmtP(primary.p_value)}，q=${fmtP(primary.q_value)}；${
-              primary.significant ? '校正后显著' : '校正后不显著，样本或效应不足'
-            }，建议${ENUMS.verdict[suggested]}。`
-          : '还没有检验结果，建议继续观察。';
-        return { experiment, primary, suggested, rationale };
+        const basis = (experiment.analysis && experiment.analysis.decision_basis) || {};
+        const existing = staleDecisions.find((item) => String(item.experiment_id) === String(experiment.id));
+        const ready = Boolean(experiment.analysis && experiment.analysis.status === 'ready');
+        const suggested =
+          ready && basis.suggested_verdict
+            ? basis.suggested_verdict
+            : primary.significant
+              ? primary.lift >= 0
+                ? 'ship'
+                : 'stop'
+              : 'continue';
+        const rationale = basis.rationale
+          ? `${basis.rationale} 建议${ENUMS.verdict[suggested]}。`
+          : primary.metric_name
+            ? `${primary.metric_name}：lift ${signedPct(primary.lift, 1)}，p=${fmtP(primary.p_value)}，q=${fmtP(primary.q_value)}；建议${ENUMS.verdict[suggested]}。`
+            : '还没有检验结果，建议继续观察。';
+        return { experiment, primary, suggested, rationale, existing, run: experiment.analysis, ready };
       });
 
     view.innerHTML = `
@@ -131,8 +159,8 @@ export const decisionsPage = {
         <div class="panel-head">
           <h2>决策与导出</h2>
           <div style="display:flex;gap:8px;align-items:center">
-            <span class="meta">已决策 ${decisions.total} / ${experiments.total}</span>
-            ${can(ctx.user.role, 'decision:write') ? '<button class="btn sm accent" id="new-decision">出决策</button>' : '<span class="mono muted">决策需实验负责人</span>'}
+            <span class="meta">有效决策 ${activeDecisions.length} / ${experiments.total} · 过期 ${staleDecisions.length}</span>
+            ${can(ctx.user.role, 'decision:write') ? '<button class="btn sm accent" id="new-decision">出决策 / 改判</button>' : '<span class="mono muted">决策需实验负责人</span>'}
           </div>
         </div>
         <div class="panel-body">
@@ -160,11 +188,25 @@ export const decisionsPage = {
             { key: 'experiment_code', label: '实验', className: 'mono nowrap' },
             { key: 'experiment_name', label: '名称' },
             { key: 'verdict', label: '结论', render: (row) => badge(verdictTone(row.verdict), row.verdict_label) },
+            {
+              key: 'status',
+              label: '状态',
+              render: (row) =>
+                row.status === 'active'
+                  ? badge('ok', '有效')
+                  : badge('danger', '已过期') + (row.stale_reason ? `<div class="tiny muted">${esc(row.stale_reason)}</div>` : ''),
+            },
+            {
+              key: 'provenance',
+              label: '依据',
+              render: (row) =>
+                `<span class="mono">批次 #${esc(row.analysis_run_no || '—')}</span><div class="tiny muted">第 ${esc(row.revision)} 版</div>`,
+            },
             { key: 'rationale', label: '理由', render: (row) => `<span>${esc(row.rationale)}</span>` },
             { key: 'decided_by', label: '决策人', className: 'mono nowrap' },
             { key: 'decided_at', label: '时间', render: (row) => fmtTime(row.decided_at) },
           ],
-          empty: { title: '还没有决策', hint: '选一个已跑完检验的实验出结论。' },
+          empty: { title: '还没有决策', hint: '选一个已完成对账并生成分析批次的实验出结论。' },
         })}
       </section>
 
@@ -176,14 +218,16 @@ export const decisionsPage = {
                 .map(
                   (item) => `<section class="panel">
                     <div class="panel-head">
-                      <h2>${esc(item.experiment.code)} 待决策</h2>
+                      <h2>${esc(item.experiment.code)} ${item.existing ? '待改判' : '待决策'}</h2>
                       ${badge(verdictTone(item.suggested), `建议 ${ENUMS.verdict[item.suggested]}`)}
                     </div>
                     <div class="panel-body" style="display:grid;gap:6px">
                       <div><b>${esc(item.experiment.name)}</b></div>
                       <div class="mono muted">${esc(item.experiment.primary_metric_label)} · SRM ${esc(item.experiment.srm.status_label)} · p=${fmtP(
                         item.experiment.srm.p_value,
-                      )}</div>
+                      )} · ${
+                        item.ready ? `分析批次 #${item.run.latest_run_no}` : '未完成对账'
+                      }</div>
                       ${item.primary.metric_name
                         ? `<div class="checkline">
                             <div class="item"><span class="k">lift</span><span class="v">${signedPct(item.primary.lift, 1)}</span></div>
@@ -191,6 +235,7 @@ export const decisionsPage = {
                             <div class="item"><span class="k">q</span><span class="v ${item.primary.significant ? 'pass' : 'fail'}">${fmtP(item.primary.q_value)}</span></div>
                           </div>`
                         : '<p class="muted">还没有检验结果。</p>'}
+                      ${item.existing ? `<p class="muted" style="margin:0">旧决策已过期：${esc(item.existing.stale_reason || '')}</p>` : ''}
                       <p class="muted" style="margin:0">${esc(item.rationale)}</p>
                     </div>
                   </section>`,

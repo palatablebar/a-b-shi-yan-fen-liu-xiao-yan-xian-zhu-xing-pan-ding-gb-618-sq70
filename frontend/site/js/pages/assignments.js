@@ -38,14 +38,19 @@ function pickExperiment(items, preferred) {
 function srmCard(experiment) {
   const srm = experiment.srm || {};
   const payload = srm.payload || {};
+  const origin = experiment.sample_origin === 'reconciliation';
   if (!srm.checked_at) {
     return `<div class="panel"><div class="panel-head"><h2>SRM 与功效校验</h2><span class="meta">未校验</span></div>
-      <div class="panel-body"><p class="muted">这个实验还没跑过分流校验。点上方「跑 SRM 校验」，算法会按 χ² 与样本量缺口给出结论。</p></div></div>`;
+      <div class="panel-body"><p class="muted">这个实验还没跑过分流校验。${
+        origin
+          ? '去「回传对账」完成对账并生成分析批次，分流校验与指标结果会成套产出。'
+          : '点上方「跑 SRM 校验」，算法会按 χ² 与样本量缺口给出结论。'
+      }</p></div></div>`;
   }
   return `<div class="panel">
     <div class="panel-head">
       <h2>SRM 与功效校验</h2>
-      <span class="meta">${fmtTime(srm.checked_at)}</span>
+      <span class="meta">${fmtTime(srm.checked_at)}${origin ? ' · 来自对账后分析批次' : ''}</span>
     </div>
     <div class="panel-body" style="display:grid;gap:12px">
       ${splitBar(payload.cells || [], srm.alarm)}
@@ -166,17 +171,23 @@ export const assignmentsPage = {
     const matrix = samples.matrix || { variants: [], channels: [] };
     const totalSamples = totals.reduce((sum, item) => sum + item.samples, 0);
     const planned = totals.map((item) => item.ratio).reduce((sum, value) => sum + value, 0) || 1;
+    const origin = experiment.sample_origin === 'reconciliation';
+    const canRunSrm = can(ctx.user.role, 'srm:run') && !origin;
 
     view.innerHTML = `
       <section class="panel">
         <div class="panel-head">
           <h2>样本与分流</h2>
           <div style="display:flex;gap:8px;align-items:center">
-            <span class="meta">${num(totalSamples)} 份样本 · ${num(samples.metric_keys.length)} 个指标口径</span>
+            <span class="meta">${num(totalSamples)} 份样本 · ${num(samples.metric_keys.length)} 个指标口径${
+              origin ? ' · 对账后 canonical' : ' · 手工录入'
+            }</span>
             ${
-              can(ctx.user.role, 'srm:run')
+              canRunSrm
                 ? '<button class="btn sm accent" id="run-srm">跑 SRM 校验</button>'
-                : '<span class="mono muted">只读角色仅可查看</span>'
+                : origin
+                  ? '<button class="btn sm ghost" id="go-reconcile">去回传对账</button>'
+                  : '<span class="mono muted">只读角色仅可查看</span>'
             }
           </div>
         </div>
@@ -209,7 +220,11 @@ export const assignmentsPage = {
                 options: [{ value: '', label: '全部变体' }, ...(experiment.variants || []).map((item) => ({ value: item.code, label: item.code }))],
               }),
             ],
-            actions: can(ctx.user.role, 'assignment:write') ? '<button class="btn sm ghost" id="entry-sample">录入样本</button>' : '',
+            actions: can(ctx.user.role, 'assignment:write') && !origin
+              ? '<button class="btn sm ghost" id="entry-sample">录入样本</button>'
+              : origin
+                ? `<span class="mono muted">样本来自每日回传对账，改数请去「回传对账」</span>`
+                : '',
           })}
         </div>
       </section>
@@ -296,6 +311,9 @@ export const assignmentsPage = {
       assignmentsPage.render(view, ctx);
     });
     view.querySelector('#entry-sample')?.addEventListener('click', () => openEntry(view, ctx, experiments));
+    view.querySelector('#go-reconcile')?.addEventListener('click', () => {
+      location.hash = `#/reconciliation?experiment=${experiment.id}`;
+    });
     view.querySelector('#run-srm')?.addEventListener('click', async (event) => {
       const button = event.currentTarget;
       button.disabled = true;

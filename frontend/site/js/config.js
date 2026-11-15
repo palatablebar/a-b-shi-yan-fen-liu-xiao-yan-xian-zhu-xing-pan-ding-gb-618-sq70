@@ -22,8 +22,9 @@ export const NAV = [
   { to: '#/overview', no: '01', label: '总览', permission: 'overview:read' },
   { to: '#/experiments', no: '02', label: '实验登记', permission: 'experiment:read' },
   { to: '#/assignments', no: '03', label: '样本与分流', permission: 'assignment:read' },
-  { to: '#/metrics', no: '04', label: '指标检验', permission: 'metric:read' },
-  { to: '#/decisions', no: '05', label: '决策与导出', permission: 'decision:read' },
+  { to: '#/reconciliation', no: '04', label: '回传对账', permission: 'assignment:read' },
+  { to: '#/metrics', no: '05', label: '指标检验', permission: 'metric:read' },
+  { to: '#/decisions', no: '06', label: '决策与导出', permission: 'decision:read' },
 ];
 
 export const ROLE_LABELS = {
@@ -81,6 +82,34 @@ export const ENUMS = {
     search: '搜索',
     mp: '小程序',
   },
+  reconcile: {
+    complete: '齐全',
+    delayed: '延迟',
+    conflict: '冲突',
+    reconciled: '已和解',
+  },
+  reconcileSource: {
+    assignment: '实验平台（分流）',
+    metric: '指标库（转化）',
+  },
+  reconcileSourceShort: {
+    assignment: '实验平台',
+    metric: '指标库',
+  },
+  reconcileReason: {
+    missing_assignment_side: '实验平台该格未回传',
+    missing_metric_side: '指标库该格未回传',
+    samples_differ: '分流数不一致',
+    conversions_differ: '转化数不一致',
+    samples_and_conversions_differ: '分流数与转化数都不一致',
+    invalid_counts: '转化数超过分流数',
+  },
+  analysis: {
+    ready: '有效',
+    invalidated: '已作废',
+    recomputing: '重算中',
+    none: '未生成',
+  },
 };
 
 export function can(role, permission) {
@@ -99,4 +128,12 @@ export function verdictTone(verdict) {
 
 export function srmTone(status) {
   return { srm: 'srm', balanced: 'ok', unknown: 'pending' }[status] || 'info';
+}
+
+export function reconcileTone(status) {
+  return { complete: 'ok', reconciled: 'info', delayed: 'warn', conflict: 'alarm' }[status] || 'pending';
+}
+
+export function analysisTone(status) {
+  return { ready: 'ok', invalidated: 'danger', recomputing: 'warn' }[status] || 'pending';
 }

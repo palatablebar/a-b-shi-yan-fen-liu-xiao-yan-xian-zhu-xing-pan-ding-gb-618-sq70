@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { ENUMS, can, verdictTone } from '../config.js';
+import { ENUMS, analysisTone, can, verdictTone } from '../config.js';
 import {
   badge,
   drawer,
@@ -100,8 +100,12 @@ export const metricsPage = {
     state.experimentId = String(experiment.id);
 
     let data;
+    let latest = null;
     try {
-      data = await api.get('/api/metrics', { experiment_id: experiment.id, q: state.q, limit: 100 });
+      [data, latest] = await Promise.all([
+        api.get('/api/metrics', { experiment_id: experiment.id, q: state.q, limit: 100 }),
+        api.get(`/api/experiments/${experiment.id}/analysis-runs/latest`).catch(() => ({ item: null })),
+      ]);
     } catch (err) {
       view.innerHTML = errorBox(errorMessage(err));
       view.querySelector('#retry-btn')?.addEventListener('click', () => metricsPage.render(view, ctx));
@@ -114,6 +118,10 @@ export const metricsPage = {
     const primary = items.find((item) => item.is_primary);
     const significantCount = items.filter((item) => item.significant).length;
     const methodLabel = ENUMS.correction[items[0] ? items[0].method : state.method] || state.method;
+    const run = latest && latest.item;
+    const runTone = run ? analysisTone(run.status) : 'pending';
+    const runLabel = run ? ENUMS.analysis[run.status] || run.status : '未生成';
+    const usesRun = Boolean(run);
 
     view.innerHTML = `
       <section class="panel">
@@ -121,10 +129,13 @@ export const metricsPage = {
           <h2>指标检验</h2>
           <div style="display:flex;gap:8px;align-items:center">
             <span class="meta">${items.length} 个指标 · 校正后显著 ${significantCount} 个</span>
+            <span class="badge ${esc(runTone)}">分析批次 ${run ? `#${run.run_no}` : '—'} · ${esc(runLabel)}</span>
             ${
-              can(ctx.user.role, 'metric:run')
+              can(ctx.user.role, 'metric:run') && !usesRun
                 ? '<button class="btn sm accent" id="run-metrics">跑指标检验</button>'
-                : '<span class="mono muted">只读角色仅可查看</span>'
+                : usesRun
+                  ? '<button class="btn sm ghost" id="go-reconcile">去回传对账</button>'
+                  : '<span class="mono muted">只读角色仅可查看</span>'
             }
           </div>
         </div>
@@ -205,6 +216,10 @@ export const metricsPage = {
                   <span class="mono muted">z = (p₁-p₂)/√(p̄(1-p̄)(1/n₁+1/n₂))；CI 为 Wald 区间</span>
                   ${primary ? `<span class="note">主指标 p=${fmtP(primary.p_value)} → q=${fmtP(primary.q_value)}，${primary.significant ? '校正后仍显著' : '校正后不显著'}</span>` : ''}
                 </div>
+                ${run ? `<div class="panel-foot">
+                  <span class="mono muted">分析批次 #${esc(run.run_no)}（${esc(run.status_label)}）· 统计日 ${esc(run.date_from)} ~ ${esc(run.date_to)}</span>
+                  <span class="mono muted">实验平台 ${num(run.sources.assignment ? run.sources.assignment.batches : 0)} 批 / 指标库 ${num(run.sources.metric ? run.sources.metric.batches : 0)} 批</span>
+                </div>` : ''}
               </section>
 
               <section class="panel">
@@ -270,6 +285,9 @@ export const metricsPage = {
         const item = data.items.find((entry) => String(entry.id) === row.dataset.id);
         if (item) openMetric(view, ctx, item);
       });
+    });
+    view.querySelector('#go-reconcile')?.addEventListener('click', () => {
+      location.hash = `#/reconciliation?experiment=${experiment.id}`;
     });
     view.querySelector('#run-metrics')?.addEventListener('click', async (event) => {
       const button = event.currentTarget;

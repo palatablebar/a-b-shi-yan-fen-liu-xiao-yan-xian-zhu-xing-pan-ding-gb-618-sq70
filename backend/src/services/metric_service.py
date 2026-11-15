@@ -5,10 +5,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from src.constants.enums import CORRECTION_LABELS, METRIC_LABELS, VERDICT_LABELS
-from src.models.assignment import Assignment
 from src.models.experiment import Experiment
 from src.models.metric_result import MetricResult
-from src.models.variant import Variant
 from src.services import variant_service
 from src.services.algorithms import metric_test as metric_algorithm
 from src.utils.errors import AppError
@@ -54,16 +52,13 @@ def serialize(row: MetricResult) -> dict:
     }
 
 
-def _totals(db: Session, experiment_id: int, variant_id: int, metric_key: str) -> tuple[int, int]:
-    row = db.execute(
-        select(func.coalesce(func.sum(Assignment.samples), 0), func.coalesce(func.sum(Assignment.conversions), 0))
-        .where(
-            Assignment.experiment_id == experiment_id,
-            Assignment.variant_id == variant_id,
-            Assignment.metric_key == metric_key,
-        )
-    ).one()
-    return int(row[0] or 0), int(row[1] or 0)
+def _totals(db: Session, experiment: Experiment, variant_code: str, metric_key: str) -> tuple[int, int]:
+    """取变体 × 指标的可用合计；有回传时只认对账后的 canonical 值。"""
+    from src.services import canonical_service
+
+    totals = canonical_service.variant_metric_totals(db, experiment, metric_key)
+    bucket = totals.get(variant_code) or {}
+    return int(bucket.get("samples") or 0), int(bucket.get("conversions") or 0)
 
 
 def run_checks(
@@ -84,15 +79,14 @@ def run_checks(
     if not treatments:
         raise AppError("NOT_FOUND", 404, {"entity": "variant", "code": variant_code})
 
-    metric_keys = [
-        row[0]
-        for row in db.execute(
-            select(Assignment.metric_key)
-            .where(Assignment.experiment_id == experiment.id)
-            .group_by(Assignment.metric_key)
-            .order_by(Assignment.metric_key)
-        ).all()
-    ]
+    from src.services import canonical_service
+
+    metric_keys = sorted(
+        {
+            row["metric_key"]
+            for row in canonical_service.rows(db, experiment)
+        }
+    )
     if not metric_keys:
         raise AppError("NO_SAMPLES", 422, {"reason": "该实验还没有分流样本，先录入样本再跑指标检验"})
 
@@ -100,8 +94,8 @@ def run_checks(
     for treatment in treatments:
         metrics = []
         for metric_key in metric_keys:
-            n2, c2 = _totals(db, experiment.id, control.id, metric_key)
-            n1, c1 = _totals(db, experiment.id, treatment.id, metric_key)
+            n2, c2 = _totals(db, experiment, control.code, metric_key)
+            n1, c1 = _totals(db, experiment, treatment.code, metric_key)
             if n1 <= 0 or n2 <= 0:
                 continue
             metrics.append(

@@ -10,7 +10,7 @@ from src.middlewares.rbac import require_roles
 
 router = APIRouter(prefix="/exports", tags=["exports"])
 
-ALLOWED = {"experiments", "assignments", "metrics", "decisions"}
+ALLOWED = {"experiments", "assignments", "metrics", "decisions", "reconciliation", "analysis-runs"}
 
 
 @router.get("/{kind}.csv")

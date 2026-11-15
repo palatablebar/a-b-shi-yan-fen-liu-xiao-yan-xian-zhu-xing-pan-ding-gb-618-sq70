@@ -35,3 +35,12 @@ def create_decision(
     principal: dict = Depends(require_roles(*DECISION_ROLES)),
 ) -> dict:
     return decision_controller.create_decision(db, experiment_id, payload.model_dump(), principal, request)
+
+
+@router.get("/experiments/{experiment_id}/decision-revisions")
+def decision_revisions(
+    experiment_id: int,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_roles(*READ_ROLES)),
+) -> dict:
+    return decision_controller.decision_revisions(db, experiment_id)

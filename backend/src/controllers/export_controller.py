@@ -12,13 +12,15 @@ KINDS = {
     "assignments": ("export.assignments", "assignments.csv", export_service.assignments_csv),
     "metrics": ("export.metrics", "metrics.csv", export_service.metrics_csv),
     "decisions": ("export.decisions", "decisions.csv", export_service.decisions_csv),
+    "reconciliation": ("export.reconciliation", "reconciliation.csv", export_service.reconciliation_csv),
+    "analysis-runs": ("export.analysis_runs", "analysis-runs.csv", export_service.analysis_runs_csv),
 }
 
 
 def export_csv(db: Session, kind: str, experiment_id: int | None, principal: dict, request: Request) -> Response:
     action, filename, builder = KINDS[kind]
-    if kind == "decisions":
-        content = builder(db)
+    if kind in ("decisions", "reconciliation", "analysis-runs"):
+        content = builder(db, experiment_id) if kind != "decisions" else builder(db)
     else:
         content = builder(db, experiment_id)
     audit_service.record(

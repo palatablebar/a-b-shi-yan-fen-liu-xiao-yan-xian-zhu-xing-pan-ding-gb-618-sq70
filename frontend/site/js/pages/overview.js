@@ -66,13 +66,36 @@ export const overviewPage = {
 
     const alarms = data.srm_alarms || [];
     const significant = data.significant || [];
+    const recon = data.reconciliation || {};
+    const blocked = recon.not_ready_experiments || [];
     view.innerHTML = `
       ${statStrip([
         { label: '实验台账', value: data.experiments_total, unit: '个', hint: `运行中 ${data.running_total} 个`, raw: true },
-        { label: 'SRM 告警', value: data.srm_alarm_total, unit: '个', tone: data.srm_alarm_total ? 'alarm' : '', hint: 'p < 0.001 判为分流不均' },
-        { label: '显著指标', value: data.significant_total, unit: '条', hint: `共检验 ${data.metric_total} 条（校正后）` },
-        { label: '待决策', value: data.pending_total, unit: '个', tone: 'mustard', hint: `已出决策 ${data.decided_total} 个` },
+        { label: '分流告警', value: data.srm_alarm_total, unit: '个', tone: data.srm_alarm_total ? 'alarm' : '', hint: 'p < 0.001 判为分流不均' },
+        { label: '对账阻断', value: (recon.delayed_cells || 0) + (recon.conflict_cells || 0), unit: '格', tone: (recon.delayed_cells || 0) + (recon.conflict_cells || 0) ? 'mustard' : '', hint: `延迟 ${recon.delayed_cells || 0} / 冲突 ${recon.conflict_cells || 0}` },
+        { label: '待决策', value: data.pending_total, unit: '个', tone: 'mustard', hint: `已出决策 ${data.decided_total} 个 · 过期 ${data.stale_decision_total || 0}` },
       ])}
+
+      ${
+        blocked.length
+          ? `<section class="panel">
+              <div class="panel-head"><h2>对账未齐 · 结论不可出</h2><span class="meta">${blocked.length} 个实验</span></div>
+              <div class="panel-body" style="display:grid;gap:6px">
+                ${blocked
+                  .slice(0, 4)
+                  .map(
+                    (item) =>
+                      `<div style="display:flex;justify-content:space-between;gap:8px;border-bottom:1px dashed var(--rule);padding-bottom:5px">
+                        <span><b class="mono">${esc(item.code)}</b> ${esc(item.name)}</span>
+                        <span class="muted">${esc(item.reason)} → <a href="#/reconciliation?experiment=${item.id}">去对账</a></span>
+                      </div>`,
+                  )
+                  .join('')}
+                <div class="note">两条源同一统计日齐全后才生成分析批次；延迟与冲突都算阻断</div>
+              </div>
+            </section>`
+          : ''
+      }
 
       <div class="grid-3-1">
         <section class="panel">
@@ -106,6 +129,16 @@ export const overviewPage = {
                 label: '样本',
                 className: 'num',
                 render: (row) => num(row.srm.payload && row.srm.payload.total ? row.srm.payload.total : 0),
+              },
+              {
+                key: 'analysis',
+                label: '分析批次',
+                render: (row) =>
+                  row.analysis && row.analysis.status === 'ready'
+                    ? badge('ok', `#${row.analysis.latest_run_no}`)
+                    : row.analysis && row.analysis.status === 'invalidated'
+                      ? badge('danger', '已作废')
+                      : badge('pending', '未生成'),
               },
             ],
             empty: { title: '还没有登记实验', hint: '去「实验登记」建第一个实验。' },

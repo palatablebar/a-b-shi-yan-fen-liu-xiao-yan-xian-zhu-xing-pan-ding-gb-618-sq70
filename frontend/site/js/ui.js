@@ -133,14 +133,21 @@ export function kv(items) {
 }
 
 export function field({ label, name, type = 'text', value = '', placeholder = '', options = null, attrs = '', hint = '', grow = false }) {
-  const control = options
-    ? `<select name="${esc(name)}" id="${esc(name)}" ${attrs}>${options
-        .map(
-          (opt) =>
-            `<option value="${esc(opt.value)}" ${String(opt.value) === String(value) ? 'selected' : ''}>${esc(opt.label)}</option>`,
-        )
-        .join('')}</select>`
-    : `<input name="${esc(name)}" id="${esc(name)}" type="${esc(type)}" value="${esc(value)}" placeholder="${esc(placeholder)}" ${attrs} />`;
+  let control;
+  if (options) {
+    control = `<select name="${esc(name)}" id="${esc(name)}" ${attrs}>${options
+      .map(
+        (opt) =>
+          `<option value="${esc(opt.value)}" ${String(opt.value) === String(value) ? 'selected' : ''}>${esc(opt.label)}</option>`,
+      )
+      .join('')}</select>`;
+  } else if (type === 'textarea') {
+    const rows = /rows="(\d+)"/.exec(attrs)?.[1] || 5;
+    const rest = attrs.replace(/rows="\d+"/, '').trim();
+    control = `<textarea name="${esc(name)}" id="${esc(name)}" rows="${rows}" placeholder="${esc(placeholder)}" ${rest}>${esc(value)}</textarea>`;
+  } else {
+    control = `<input name="${esc(name)}" id="${esc(name)}" type="${esc(type)}" value="${esc(value)}" placeholder="${esc(placeholder)}" ${attrs} />`;
+  }
   return `<div class="field ${grow ? 'grow' : ''}"><label for="${esc(name)}">${esc(label)}</label>${control}${
     hint ? `<span class="hint">${esc(hint)}</span>` : ''
   }</div>`;

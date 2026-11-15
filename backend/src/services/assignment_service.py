@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from src.constants.enums import CHANNEL_LABELS, CHANNEL_ORDER, METRIC_LABELS
+from src.constants.enums import CHANNEL_LABELS, CHANNEL_ORDER, METRIC_LABELS, RETURN_SOURCE_SHORT
 from src.models.assignment import Assignment
 from src.models.experiment import Experiment
 from src.models.variant import Variant
@@ -44,6 +44,53 @@ def list_assignments(
     limit: int = 60,
     offset: int = 0,
 ) -> dict:
+    experiment = db.get(Experiment, experiment_id)
+    if experiment is not None:
+        from src.services import canonical_service
+
+        if canonical_service.has_returns(db, experiment_id):
+            rows = canonical_service.rows(
+                db,
+                experiment,
+                metric_key=metric_key,
+                variant_code=variant_code,
+                channel=channel,
+            )
+            rows.sort(key=lambda row: (row["stat_date"], row["channel"], row["metric_key"]), reverse=True)
+            total = len(rows)
+            variants = {
+                item.code: item
+                for item in db.scalars(select(Variant).where(Variant.experiment_id == experiment_id)).all()
+            }
+            page = rows[offset : offset + limit]
+            return {
+                "items": [
+                    {
+                        "id": row["id"],
+                        "experiment_id": row["experiment_id"],
+                        "variant_id": row["variant_id"],
+                        "variant_code": row["variant_code"],
+                        "variant_name": row["variant_name"],
+                        "channel": row["channel"],
+                        "channel_label": CHANNEL_LABELS.get(row["channel"], row["channel"]),
+                        "metric_key": row["metric_key"],
+                        "metric_label": METRIC_LABELS.get(row["metric_key"], row["metric_key"]),
+                        "stat_date": iso_date(row["stat_date"]),
+                        "samples": row["samples"],
+                        "conversions": row["conversions"],
+                        "rate": round(row["conversions"] / row["samples"], 6) if row["samples"] else 0.0,
+                        "operator_email": RETURN_SOURCE_SHORT.get(row.get("source") or "", "对账采用"),
+                        "source": row.get("source"),
+                        "origin": "reconciliation",
+                        "updated_at": None,
+                    }
+                    for row in page
+                ],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "origin": "reconciliation",
+            }
     stmt = select(Assignment).where(Assignment.experiment_id == experiment_id)
     count_stmt = select(func.count()).select_from(Assignment).where(Assignment.experiment_id == experiment_id)
     if variant_code:
@@ -69,64 +116,51 @@ def list_assignments(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "origin": "assignment",
     }
 
 
 def variant_totals(db: Session, experiment: Experiment, metric_key: str | None = None) -> list[dict]:
-    """按变体聚合分流样本（SRM 的输入）。"""
+    """按变体聚合分流样本（SRM 的输入）。
+
+    有每日回传的实验只认对账后 canonical 的值；没有回传时回退手工录入。
+    """
+    from src.services import canonical_service
+
     metric = metric_key or experiment.primary_metric
-    rows = db.execute(
-        select(
-            Variant.id,
-            Variant.code,
-            Variant.name,
-            Variant.ratio,
-            Variant.is_control,
-            Variant.sort_order,
-            func.coalesce(func.sum(Assignment.samples), 0),
-            func.coalesce(func.sum(Assignment.conversions), 0),
-        )
-        .join(Assignment, and_(Assignment.variant_id == Variant.id, Assignment.metric_key == metric))
-        .where(Variant.experiment_id == experiment.id)
-        .group_by(Variant.id, Variant.code, Variant.name, Variant.ratio, Variant.is_control, Variant.sort_order)
-        .order_by(Variant.sort_order, Variant.id)
+    variants = db.scalars(
+        select(Variant).where(Variant.experiment_id == experiment.id).order_by(Variant.sort_order, Variant.id)
     ).all()
-    if not rows:
-        # 没有样本时也要列出变体，便于页面提示「先录入样本」
-        variants = db.scalars(
-            select(Variant).where(Variant.experiment_id == experiment.id).order_by(Variant.sort_order, Variant.id)
-        ).all()
-        return [
-            {
-                "variant_id": item.id,
-                "code": item.code,
-                "name": item.name,
-                "ratio": item.ratio,
-                "is_control": item.is_control,
-                "samples": 0,
-                "conversions": 0,
-                "rate": 0.0,
-            }
-            for item in variants
-        ]
-    total = sum(int(row[6]) for row in rows) or 1
+    totals = canonical_service.variant_metric_totals(db, experiment, metric)
+    grand_total = sum(bucket["samples"] for bucket in totals.values())
     return [
         {
-            "variant_id": row[0],
-            "code": row[1],
-            "name": row[2],
-            "ratio": row[3],
-            "is_control": row[4],
-            "samples": int(row[6]),
-            "conversions": int(row[7]),
-            "rate": round(int(row[7]) / int(row[6]), 6) if row[6] else 0.0,
-            "share_pct": round(int(row[6]) / total * 100, 4),
+            "variant_id": item.id,
+            "code": item.code,
+            "name": item.name,
+            "ratio": item.ratio,
+            "is_control": item.is_control,
+            "samples": totals.get(item.code, {}).get("samples", 0),
+            "conversions": totals.get(item.code, {}).get("conversions", 0),
+            "rate": round(totals[item.code]["conversions"] / totals[item.code]["samples"], 6)
+            if totals.get(item.code, {}).get("samples")
+            else 0.0,
+            "share_pct": round(totals.get(item.code, {}).get("samples", 0) / grand_total * 100, 4)
+            if grand_total
+            else 0.0,
         }
-        for row in rows
+        for item in variants
     ]
 
 
 def metric_keys(db: Session, experiment_id: int) -> list[str]:
+    experiment = db.get(Experiment, experiment_id)
+    if experiment is not None:
+        from src.services import canonical_service
+
+        keys = sorted({row["metric_key"] for row in canonical_service.rows(db, experiment)})
+        if keys:
+            return keys
     rows = db.execute(
         select(Assignment.metric_key).where(Assignment.experiment_id == experiment_id).group_by(Assignment.metric_key)
     ).all()
@@ -134,25 +168,18 @@ def metric_keys(db: Session, experiment_id: int) -> list[str]:
 
 
 def channel_matrix(db: Session, experiment: Experiment, metric_key: str | None = None) -> dict:
-    """渠道 × 变体样本矩阵（页面「各变体样本对照」表）。"""
+    """渠道 × 变体样本矩阵（页面「各变体样本对照」表），取对账后可用值。"""
+    from src.services import canonical_service
+
     metric = metric_key or experiment.primary_metric
-    rows = db.execute(
-        select(
-            Assignment.channel,
-            Variant.code,
-            func.coalesce(func.sum(Assignment.samples), 0),
-            func.coalesce(func.sum(Assignment.conversions), 0),
-        )
-        .join(Variant, Variant.id == Assignment.variant_id)
-        .where(Assignment.experiment_id == experiment.id, Assignment.metric_key == metric)
-        .group_by(Assignment.channel, Variant.code)
-    ).all()
     variants = db.scalars(
         select(Variant).where(Variant.experiment_id == experiment.id).order_by(Variant.sort_order, Variant.id)
     ).all()
     matrix = {channel: {variant.code: {"samples": 0, "conversions": 0} for variant in variants} for channel in CHANNEL_ORDER}
-    for channel, code, samples, conversions in rows:
-        matrix.setdefault(channel, {})[code] = {"samples": int(samples), "conversions": int(conversions)}
+    for row in canonical_service.rows(db, experiment, metric_key=metric):
+        bucket = matrix.setdefault(row["channel"], {}).setdefault(row["variant_code"], {"samples": 0, "conversions": 0})
+        bucket["samples"] += int(row["samples"])
+        bucket["conversions"] += int(row["conversions"])
     return {
         "metric_key": metric,
         "metric_label": METRIC_LABELS.get(metric, metric),
@@ -165,15 +192,17 @@ def channel_matrix(db: Session, experiment: Experiment, metric_key: str | None =
 
 
 def daily_series(db: Session, experiment: Experiment, metric_key: str | None = None) -> list[dict]:
+    from src.services import canonical_service
+
     metric = metric_key or experiment.primary_metric
-    rows = db.execute(
-        select(Assignment.stat_date, func.coalesce(func.sum(Assignment.samples), 0), func.coalesce(func.sum(Assignment.conversions), 0))
-        .where(Assignment.experiment_id == experiment.id, Assignment.metric_key == metric)
-        .group_by(Assignment.stat_date)
-        .order_by(Assignment.stat_date)
-    ).all()
+    buckets: dict[date, dict[str, int]] = {}
+    for row in canonical_service.rows(db, experiment, metric_key=metric):
+        bucket = buckets.setdefault(row["stat_date"], {"samples": 0, "conversions": 0})
+        bucket["samples"] += int(row["samples"])
+        bucket["conversions"] += int(row["conversions"])
     return [
-        {"date": iso_date(row[0]), "samples": int(row[1]), "conversions": int(row[2])} for row in rows
+        {"date": iso_date(day), "samples": values["samples"], "conversions": values["conversions"]}
+        for day, values in sorted(buckets.items())
     ]
 
 

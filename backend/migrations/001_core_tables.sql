@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS decisions (
   rationale TEXT,
   decided_by VARCHAR(160) NOT NULL DEFAULT '',
   decided_at DATETIME NOT NULL,
+  analysis_run_id INT NULL,
+  analysis_run_no INT NULL,
+  revision INT NOT NULL DEFAULT 1,
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  stale_reason TEXT NULL,
   seed_key VARCHAR(120) NULL UNIQUE,
   updated_at DATETIME NOT NULL,
   UNIQUE KEY uq_decision_experiment (experiment_id),
@@ -123,4 +128,114 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   ip VARCHAR(64) NULL,
   seed_key VARCHAR(120) NULL UNIQUE,
   created_at DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---- 每日回传与对账（实验平台分流数 / 指标库转化数，每天各一次）----
+
+CREATE TABLE IF NOT EXISTS return_batches (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  experiment_id INT NOT NULL,
+  source VARCHAR(16) NOT NULL,              -- assignment | metric
+  stat_date DATE NOT NULL,
+  batch_no VARCHAR(64) NOT NULL,
+  revision INT NOT NULL DEFAULT 1,
+  fingerprint CHAR(64) NOT NULL,            -- 规范化内容的 SHA-256，识别重试 / 改数
+  rows_count INT NOT NULL DEFAULT 0,
+  samples_total INT NOT NULL DEFAULT 0,
+  conversions_total INT NOT NULL DEFAULT 0,
+  status VARCHAR(12) NOT NULL DEFAULT 'active',  -- active | superseded
+  note TEXT NULL,
+  received_by VARCHAR(160) NOT NULL DEFAULT 'system',
+  received_at DATETIME NOT NULL,
+  superseded_at DATETIME NULL,
+  UNIQUE KEY uq_return_batch_revision (experiment_id, source, stat_date, batch_no, revision),
+  KEY ix_return_batch_active (experiment_id, source, stat_date, status),
+  CONSTRAINT fk_return_batch_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS return_batch_rows (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  batch_id INT NOT NULL,
+  experiment_id INT NOT NULL,
+  source VARCHAR(16) NOT NULL,
+  stat_date DATE NOT NULL,
+  variant_code VARCHAR(40) NOT NULL,
+  channel VARCHAR(20) NOT NULL,
+  metric_key VARCHAR(40) NOT NULL,
+  samples INT NOT NULL DEFAULT 0,
+  conversions INT NOT NULL DEFAULT 0,
+  UNIQUE KEY uq_return_batch_row (batch_id, variant_code, channel, metric_key),
+  CONSTRAINT fk_return_row_batch FOREIGN KEY (batch_id) REFERENCES return_batches(id) ON DELETE CASCADE,
+  CONSTRAINT fk_return_row_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS reconciliation_cells (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  experiment_id INT NOT NULL,
+  stat_date DATE NOT NULL,
+  variant_code VARCHAR(40) NOT NULL,
+  channel VARCHAR(20) NOT NULL,
+  metric_key VARCHAR(40) NOT NULL,
+  assignment_batch_id INT NULL,
+  metric_batch_id INT NULL,
+  assignment_samples INT NULL, assignment_conversions INT NULL,
+  metric_samples INT NULL, metric_conversions INT NULL,
+  sample_delta INT NULL, conversion_delta INT NULL,
+  status VARCHAR(12) NOT NULL,              -- complete | delayed | conflict | reconciled
+  reason VARCHAR(40) NULL,                  -- missing_* / samples_differ / conversions_differ / both / invalid
+  resolution VARCHAR(16) NULL,              -- assignment | metric
+  explanation TEXT NULL,
+  explained_by VARCHAR(160) NULL,
+  explained_at DATETIME NULL,
+  canonical_source VARCHAR(16) NULL,
+  canonical_samples INT NULL, canonical_conversions INT NULL,
+  usable TINYINT(1) NOT NULL DEFAULT 0,
+  auto_explainable TINYINT(1) NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL,
+  UNIQUE KEY uq_reconciliation_cell (experiment_id, stat_date, variant_code, channel, metric_key),
+  CONSTRAINT fk_recon_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS analysis_runs (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  experiment_id INT NOT NULL,
+  run_no INT NOT NULL,
+  status VARCHAR(14) NOT NULL DEFAULT 'ready',  -- ready | invalidated | recomputing
+  snapshot_fingerprint CHAR(64) NOT NULL,
+  date_fingerprints JSON NULL,
+  date_from VARCHAR(10) NULL, date_to VARCHAR(10) NULL,
+  dates_used JSON NULL,
+  method VARCHAR(16) NOT NULL DEFAULT 'bh',
+  alpha FLOAT NOT NULL DEFAULT 0.05,
+  srm_payload JSON NULL,
+  metric_payload JSON NULL,
+  decision_basis JSON NULL,
+  sources JSON NULL,                        -- 双方原始批次数 / revision / 指纹 / 日期
+  invalidated_reason TEXT NULL,
+  invalidated_at DATETIME NULL,
+  superseded_by INT NULL,
+  previous_run_id INT NULL,
+  recomputed_dates JSON NULL,
+  reused_dates JSON NULL,
+  computed_by VARCHAR(160) NOT NULL DEFAULT 'system',
+  computed_at DATETIME NOT NULL,
+  KEY ix_analysis_experiment_status (experiment_id, status),
+  CONSTRAINT fk_analysis_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS decision_revisions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  decision_id INT NOT NULL,
+  experiment_id INT NOT NULL,
+  revision INT NOT NULL DEFAULT 1,
+  verdict VARCHAR(16) NOT NULL,
+  rationale TEXT,
+  decided_by VARCHAR(160) NOT NULL DEFAULT '',
+  decided_at DATETIME NOT NULL,
+  analysis_run_id INT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'active',  -- active | superseded | invalidated
+  invalidated_reason TEXT NULL,
+  created_at DATETIME NOT NULL,
+  CONSTRAINT fk_decision_revision FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE CASCADE,
+  CONSTRAINT fk_decision_revision_experiment FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

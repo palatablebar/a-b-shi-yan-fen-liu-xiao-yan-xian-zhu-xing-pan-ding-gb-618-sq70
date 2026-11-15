@@ -17,6 +17,7 @@ from src.models.assignment import Assignment
 from src.models.decision import Decision
 from src.models.experiment import Experiment
 from src.models.metric_result import MetricResult
+from src.services import canonical_service
 from src.utils.timeutil import iso_date, local_now, utcnow
 
 
@@ -33,6 +34,9 @@ def worker_alive() -> bool:
 
 
 def overview(db: Session) -> dict:
+    from src.models.analysis_run import AnalysisRun
+    from src.models.reconciliation import ReconciliationCell
+
     experiments_total = db.scalar(select(func.count()).select_from(Experiment)) or 0
     running_total = (
         db.scalar(select(func.count()).select_from(Experiment).where(Experiment.status == "running")) or 0
@@ -45,7 +49,58 @@ def overview(db: Session) -> dict:
         db.scalar(select(func.count()).select_from(MetricResult).where(MetricResult.significant.is_(True))) or 0
     )
     decided_total = db.scalar(select(func.count()).select_from(Decision)) or 0
+    stale_decision_total = (
+        db.scalar(select(func.count()).select_from(Decision).where(Decision.status == "stale")) or 0
+    )
     pending_total = max(0, experiments_total - decided_total)
+
+    delayed_cells = (
+        db.scalar(
+            select(func.count()).select_from(ReconciliationCell).where(ReconciliationCell.status == "delayed")
+        )
+        or 0
+    )
+    conflict_cells = (
+        db.scalar(
+            select(func.count()).select_from(ReconciliationCell).where(ReconciliationCell.status == "conflict")
+        )
+        or 0
+    )
+    reconciled_cells = (
+        db.scalar(
+            select(func.count()).select_from(ReconciliationCell).where(ReconciliationCell.status == "reconciled")
+        )
+        or 0
+    )
+    delayed_dates = (
+        db.scalar(
+            select(func.count(func.distinct(ReconciliationCell.stat_date))).where(
+                ReconciliationCell.status == "delayed"
+            )
+        )
+        or 0
+    )
+    invalidated_runs = (
+        db.scalar(select(func.count()).select_from(AnalysisRun).where(AnalysisRun.status == "invalidated")) or 0
+    )
+    ready_runs = db.scalars(
+        select(AnalysisRun).where(AnalysisRun.status == "ready").order_by(AnalysisRun.id.desc())
+    ).all()
+    latest_by_experiment: dict[int, AnalysisRun] = {}
+    for run in ready_runs:
+        latest_by_experiment.setdefault(run.experiment_id, run)
+    not_ready_experiments = []
+    for experiment in db.scalars(select(Experiment).order_by(Experiment.id)).all():
+        run = latest_by_experiment.get(experiment.id)
+        if run is None:
+            not_ready_experiments.append(
+                {
+                    "id": experiment.id,
+                    "code": experiment.code,
+                    "name": experiment.name,
+                    "reason": "还没有可用的分析批次",
+                }
+            )
 
     status_rows = db.execute(select(Experiment.status, func.count()).group_by(Experiment.status)).all()
     status_map = dict(status_rows)
@@ -73,20 +128,18 @@ def overview(db: Session) -> dict:
     trend = []
     if latest_date is not None:
         start = latest_date - timedelta(days=6)
-        rows = db.execute(
-            select(
-                Assignment.stat_date,
-                func.coalesce(func.sum(Assignment.samples), 0),
-                func.coalesce(func.sum(Assignment.conversions), 0),
-            )
-            .where(Assignment.stat_date >= start, Assignment.stat_date <= latest_date)
-            .group_by(Assignment.stat_date)
-            .order_by(Assignment.stat_date)
-        ).all()
-        by_date = {row[0]: (int(row[1]), int(row[2])) for row in rows}
+        by_date: dict[object, list[int]] = {}
+        for experiment in db.scalars(select(Experiment)).all():
+            for row in canonical_service.rows(db, experiment, metric_key=experiment.primary_metric):
+                day = row["stat_date"]
+                if day < start or day > latest_date:
+                    continue
+                bucket = by_date.setdefault(day, [0, 0])
+                bucket[0] += int(row["samples"])
+                bucket[1] += int(row["conversions"])
         for offset in range(6, -1, -1):
             day = latest_date - timedelta(days=offset)
-            samples, conversions = by_date.get(day, (0, 0))
+            samples, conversions = by_date.get(day, [0, 0])
             trend.append(
                 {
                     "date": iso_date(day),
@@ -108,6 +161,16 @@ def overview(db: Session) -> dict:
         "significant_total": significant_total,
         "decided_total": decided_total,
         "pending_total": pending_total,
+        "stale_decision_total": stale_decision_total,
+        "reconciliation": {
+            "delayed_cells": delayed_cells,
+            "conflict_cells": conflict_cells,
+            "reconciled_cells": reconciled_cells,
+            "delayed_dates": delayed_dates,
+            "invalidated_runs": invalidated_runs,
+            "ready_runs": len(ready_runs),
+            "not_ready_experiments": not_ready_experiments,
+        },
         "sample_total": db.scalar(select(func.coalesce(func.sum(Assignment.samples), 0))) or 0,
         "assignment_rows": db.scalar(select(func.count()).select_from(Assignment)) or 0,
         "worker_alive": worker_alive(),

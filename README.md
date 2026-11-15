@@ -7,21 +7,43 @@
 - **模拟客户**：橙野 App · 增长实验组（7 人），每周 8 个实验，1 个 App × 4 个渠道（信息流 / 推送 / 搜索 / 小程序）。
 - **现有工作流**：实验平台只负责分流，结果导出 CSV 丢给分析师跑 SQL + Excel，
   卡方和 t 检验各算一遍，p 值 < 0.05 就写进上线邮件。
+- **每日回传的双源现实**：实验平台（分流数）与指标库（转化数）每天各回传一次。
+  批次重试或补数后两边总量经常对不上，页面若直接采用「最近一次上传」，就会出现
+  **分流校验用一边的数据、显著性沿用另一边的旧结果**，负责人据此做上线决定。
 - **三个痛点**：
   1. **分流不均没查（SRM）**：某 SDK 版本把 50/50 分成了 52.3/47.7，对照组凭空多 138 个样本，指标差异全被污染；
   2. **只看 p 值不看功效与最小可检测效应**：5,000 份样本去检测 1.1pp 的效应，功效只有 45%，算出来的「显著」其实是噪音；
   3. **多指标同时看没做多重比较校正**：一次实验 4 个指标，随便哪个 p<0.05 就宣布成功，假发现率失控。
-- **上下游**：埋点 → 实验平台（分流）→ **本系统（分流校验 → 指标检验 → 决策建议）** → 产品决策会 / 上线评审。
+- **上下游**：埋点 → 实验平台（分流）→ 指标库（转化）→ **本系统（逐日对账 → 分流校验 → 指标检验 → 决策建议）** → 产品决策会 / 上线评审。
 - **一天的工作剧本**：
   1. 09:20 实验负责人 `admin@abcheck.io` 登录，总览上 `EXP-2603-CARTBTN` 挂着 **SRM 告警**（χ²=12.696, p=0.000366）；
-  2. 10:00 打开「样本与分流」，看到 control 3,138 / treat_short 2,862（计划 50/50，实测 52.3% / 47.7%），
-     每变体所需样本 11,780，当前功效只有 28.1% —— 先去查分流 SDK；
-  3. 11:00 打开 `EXP-2610-CASH8`，主指标下单转化率 10.09% → 11.19%，lift +10.89%，Wald CI [+0.25pp, +1.94pp]；
-  4. 11:10 切到「指标检验」跑 BH 校正：4 个指标里主指标 q=0.0436 < 0.05，另外 3 个不显著；
-     森林图上只有主指标的点越过 0 之外；
-  5. 11:30 出决策「上线」，理由自动带上 lift / q / 样本量，写进 06-22 决策会纪要；
-  6. 14:00 分析师 `analyst@abcheck.io` 导出 `metrics.csv`（28 条检验结果）做周报，审计日志记下这次导出；
-  7. 17:30 业务只读 `viewer@abcheck.io` 打开总览和实验台账，导出按钮不存在；直接请求导出接口真实返回 **403**。
+  2. 09:40 打开「回传对账」，看到 7 天里实验平台 7 批 / 指标库 7 批；某实验最后一天指标库批次没到 → **延迟**，逐格标红，分析批次被门禁挡住；
+  3. 10:00 另一实验有 1 格转化数差 −3 → **冲突**，填「指标库去重了重复上报的订单」并采用指标库 → 转 **已和解**；
+  4. 10:20 冲突格一变，引用旧数据的分析批次立刻 **作废**，负责人的决策同步转 **过期**；重新生成时只重算受影响那一天，其余 6 天沿用；
+  5. 11:00 打开 `EXP-2610-CASH8`，主指标下单转化率 10.09% → 11.19%，lift +10.89%，Wald CI [+0.25pp, +1.94pp]；
+  6. 11:10 切到「指标检验」跑 BH 校正：4 个指标里主指标 q=0.0436 < 0.05，另外 3 个不显著；森林图上只有主指标的点越过 0 之外；
+  7. 11:30 出决策「上线」，理由自动带上 lift / q / 样本量 / 分析批次号，写进 06-22 决策会纪要；
+  8. 14:00 分析师 `analyst@abcheck.io` 导出 `metrics.csv` 与 `analysis-runs.csv`（28 条检验结果 + 双方批次数）做周报，审计日志记下这次导出；
+  9. 17:30 业务只读 `viewer@abcheck.io` 打开总览和实验台账，导出按钮不存在；直接请求导出接口真实返回 **403**。
+
+## 1.1 逐日双源对账口径（核心新增）
+
+| 概念 | 口径 |
+|---|---|
+| 回传批次 | 自然键 `(实验, 来源, 统计日, 批次号)`；`revision` 从 1 起递增 |
+| 同批次重试 | 同批次号 + **同内容指纹** → `duplicate`：不新增批次、不重复累计、不触发重算 |
+| 改数 | 同批次号但内容指纹变化 → `revision + 1`，旧批次 `superseded`，受影响统计日标脏 |
+| 新的批次号 | 同来源同一天再报一次 → 旧活动批次被取代，新批次生效 |
+| 逐格对账键 | `(变体, 渠道, 指标)`，外层按统计日 |
+| 齐全 `complete` | 两侧都有且分流数、转化数完全一致 |
+| 延迟 `delayed` | 只有一侧有这一格；**不允许单边凑合**，必须等另一侧回传 |
+| 冲突 `conflict` | 两侧都有但数值不同（含转化数超过分流数） |
+| 已和解 `reconciled` | 冲突格填写解释 + 指定采用侧（`assignment` / `metric`）后才可用 |
+| 分析门禁 | 参与分析的**同一批统计日**必须全部 `complete`/`reconciled`，否则 422 `NOT_RECONCILED` |
+| 分析批次 | 在一份 canonical 快照上同时算分流校验 + 指标结果 + 决策依据，并记录双方原始批次数 |
+| 作废 | 源数据变化 / 新解释 → 引用旧快照的分析批次 `invalidated`，其决策转 `stale` |
+| 增量重算 | 按统计日指纹比对，只有变化日计入 `recomputed_dates`，其余进 `reused_dates`；指纹不变直接复用 |
+| 溯源导出 | 所有 CSV 带双方批次数、revision、差异原因、采用侧、分析批次号与使用统计日 |
 
 ## 2. 角色与权限
 
@@ -39,11 +61,16 @@
 | # | 业务模块 | 对应页面 | 后端 services / controller | 主要 API |
 |---|---|---|---|---|
 | ① | 实验登记（实验 + 变体） | `#/experiments` 实验登记 | `experiment_service` / `variant_service` · `experiment_controller` | `GET/POST /api/experiments`、`GET/PATCH /api/experiments/{id}` |
-| ② | 分流样本接入（变体×渠道×日期×指标） | `#/assignments` 样本与分流 | `assignment_service` · `assignment_controller` | `GET /api/experiments/{id}/samples`、`GET/POST /api/experiments/{id}/assignments` |
-| ③ | SRM 与功效校验（算法 A） | `#/assignments`（SRM 卡）+ `#/overview`（告警） | `algorithms/srm.py` + `stats.py` · `srm_service` · `metric_controller` | `GET /api/experiments/{id}/srm`、`POST /api/experiments/{id}/srm-check` |
-| ④ | 指标检验（算法 B） | `#/metrics` 指标检验 | `algorithms/metric_test.py` · `metric_service` · `metric_controller` | `GET /api/metrics`、`POST /api/experiments/{id}/metric-tests` |
-| ⑤ | 多重比较与决策 | `#/metrics`（q 值对比）+ `#/decisions` | `metric_service` / `decision_service` · `decision_controller` | `GET /api/decisions`、`POST /api/experiments/{id}/decisions` |
-| ⑥ | 报告导出与台账总览 | `#/decisions`（导出）+ `#/overview` | `export_service` / `overview_service` · `export_controller`、`overview_service` | `GET /api/exports/{experiments,assignments,metrics,decisions}.csv`、`GET /api/overview` |
+| ② | 每日双源回传 + 逐格对账 | `#/reconciliation` 回传对账 | `return_service` / `reconciliation_service` · `reconciliation_controller` | `GET/POST /api/experiments/{id}/return-batches`、`GET/POST /api/experiments/{id}/reconciliation`、`GET .../reconciliation/cells`、`POST .../cells/{cid}/explain` |
+| ③ | 分流样本接入（变体×渠道×日期×指标） | `#/assignments` 样本与分流 | `assignment_service` / `canonical_service` · `assignment_controller` | `GET /api/experiments/{id}/samples`、`GET/POST /api/experiments/{id}/assignments` |
+| ④ | 分流校验 + 指标检验（算法 A/B，成套产出） | `#/metrics` 指标检验 + `#/overview` 告警 | `analysis_service` + `algorithms/{srm,metric_test,reconcile}.py` · `metric_controller`、`reconciliation_controller` | `GET /api/experiments/{id}/srm`、`POST /api/experiments/{id}/srm-check`（仅手工样本实验）、`POST /api/experiments/{id}/analysis-runs`、`GET .../analysis-runs/latest` |
+| ⑤ | 多重比较与决策（引用有效批次、改判留史） | `#/metrics`（q 值对比）+ `#/decisions` | `metric_service` / `decision_service` · `decision_controller` | `GET /api/decisions`、`POST /api/experiments/{id}/decisions`、`GET .../decision-revisions` |
+| ⑥ | 报告导出与台账总览 | `#/decisions`（导出）+ `#/overview` | `export_service` / `overview_service` · `export_controller` | `GET /api/exports/{experiments,assignments,metrics,decisions,reconciliation,analysis-runs}.csv`、`GET /api/overview` |
+
+> **成套口径**：实验一旦有每日回传，分流校验与指标检验不能在 `srm-check` / `metric-tests`
+> 单独跑（409 CONFLICT），必须通过 `POST /analysis-runs` 在同一份 canonical 快照上生成
+> 「分流校验 + 指标结果 + 决策依据」，避免页面两侧各用一份旧数据。手工录入样本的存量实验
+> （无回传批次）保留旧的单独校验入口。
 
 横切能力（不算业务模块）：登录/JWT、角色鉴权、审计日志、限流、worker 心跳。
 
@@ -59,7 +86,7 @@ open http://localhost:18207
 
 ```bash
 docker compose exec -T backend python -m scripts.seed_demo
-# SEED_SUMMARY brand=abcheck users=3 sources=6 runs=1092 findings=21 pending=2
+# SEED_SUMMARY brand=abcheck users=3 sources=6 runs=1092 findings=19 pending=2 batches=85
 ```
 
 ## 5. 本地开发
@@ -96,7 +123,7 @@ cd frontend/site && python -m http.server 5173
 ```text
 backend/
   src/{config,constants,controllers,middlewares,models,routes,schemas,services,utils}
-  src/services/algorithms/{stats,srm,metric_test}.py   # 两个算法 + 统计底座
+  src/services/algorithms/{stats,srm,metric_test,reconcile}.py   # 两个统计算法 + 回传对账纯函数
   scripts/{seed_demo.py,demo_config.py,worker_healthcheck.sh}
   migrations/  tests/
 frontend/site/{index.html,css/{tokens,app}.css,js/{config,api,store,ui,app}.js,js/pages/*.js}
@@ -128,7 +155,20 @@ frontend/site/{index.html,css/{tokens,app}.css,js/{config,api,store,ui,app}.js,j
 - 结论：`q < 0.05` 且 Δ>0 → `ship`（上线）；`q < 0.05` 且 Δ<0 → `stop`（停止）；否则 `continue`（继续观察）。
 - 失败态：样本量为 0、转化数越界、method 非 `bh|bonferroni` → 422。
 
-两个算法都是纯函数（除落库层），同样输入两次逐位一致；`backend/tests/` 覆盖正常 / 边界 / 确定性共 18 个用例。
+两个算法都是纯函数（除落库层），同样输入两次逐位一致；`backend/tests/` 覆盖正常 / 边界 / 确定性。
+
+### 算法 C｜逐日双源对账（`src/services/algorithms/reconcile.py`）
+
+- 输入：实验平台侧与指标库侧同一天的 `(变体, 渠道, 指标, 分流数, 转化数)` 行。
+- 逐格分类：两侧齐全且数值一致 → `complete`；只有一侧 → `delayed`（不可用，必须等另一侧）；
+  两侧数值不同 → `conflict`；冲突格填解释 + 指定采用侧 → `reconciled`。
+- 当天状态：任一格延迟 → `delayed`；否则任一格未解释冲突 → `conflict`；否则有和解 → `reconciled`；
+  全部齐全 → `complete`。只有 `complete` / `reconciled` 才能进分析。
+- 批次指纹：规范化行排序后 SHA-256，用于「同批次号重试」与「改数」的区分。
+- 快照聚合与指纹：按统计日聚合 canonical 值，逐日指纹用于增量重算 —— 只重算变化日。
+- 全程纯函数（不碰数据库），定义见 `tests/test_reconcile.py`（11 个用例）。
+
+全部单测：`backend/tests/` 共 40 个用例（统计 18 + 对账 11 + 服务层 11）。
 
 ## 11. 共享枚举出现位置
 
@@ -141,6 +181,11 @@ frontend/site/{index.html,css/{tokens,app}.css,js/{config,api,store,ui,app}.js,j
 | 渠道 `feed/push/search/mp` | `backend/src/constants/enums.py` | `frontend/site/js/config.js`（`ENUMS.channel`） |
 | 指标口径 `cart_rate/order_rate/retention_d1/click_rate/search_success` | `backend/src/constants/enums.py` | `frontend/site/js/config.js`（`ENUMS.metric`） |
 | 校正方法 `bh/bonferroni` | `backend/src/constants/enums.py` | `frontend/site/js/config.js`（`ENUMS.correction`） |
+| 回传来源 `assignment/metric` | `backend/src/constants/enums.py`（`ReturnSource`） | `frontend/site/js/config.js`（`ENUMS.reconcileSource` / `reconcileSourceShort`） |
+| 对账状态 `complete/delayed/conflict/reconciled` | `backend/src/constants/enums.py`（`ReconcileStatus`） | `frontend/site/js/config.js`（`ENUMS.reconcile` + `reconcileTone`） |
+| 差异原因 `missing_*/samples_differ/conversions_differ/...` | `backend/src/services/algorithms/reconcile.py`（`REASON_LABELS`） | `frontend/site/js/config.js`（`ENUMS.reconcileReason`） |
+| 分析批次状态 `ready/invalidated/recomputing` | `backend/src/constants/enums.py`（`AnalysisStatus`） | `frontend/site/js/config.js`（`ENUMS.analysis` + `analysisTone`） |
+| 决策状态 `active/stale` | `backend/src/models/decision.py` | `frontend/site/js/pages/decisions.js` |
 
 ## 12. Docker 说明
 

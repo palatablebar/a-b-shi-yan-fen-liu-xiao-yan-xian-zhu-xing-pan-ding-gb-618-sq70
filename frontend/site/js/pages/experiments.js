@@ -56,9 +56,10 @@ function detailBody(item) {
     ['基准转化率', pct(item.baseline_rate, 2)],
     ['目标最小效应', pct(item.planned_mde, 2)],
     ['α / 目标功效', `${item.alpha} / ${pct(item.power_target, 0)}`],
-    ['样本合计', `${num(item.sample_total)} 份 · ${num(item.assignment_rows)} 行（主指标口径）`],
+    ['样本合计', `${num(item.sample_total)} 份 · ${num(item.assignment_rows)} 行（主指标口径，${item.sample_origin === 'reconciliation' ? '对账后 canonical' : '手工录入'}）`],
     ['分流说明', esc(item.traffic_note || '—')],
     ['日期', `${esc(item.started_on || '—')} ~ ${esc(item.ended_on || '进行中')}`],
+    ['分析批次', item.analysis && item.analysis.latest_run_no ? `#${item.analysis.latest_run_no} · ${esc(ENUMS.analysis[item.analysis.status] || item.analysis.status)}` : '未生成'],
   ])}
   <div style="margin-top:10px">
     <div class="eyebrow">假设</div>
